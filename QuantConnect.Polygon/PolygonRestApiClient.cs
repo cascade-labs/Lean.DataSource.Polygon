@@ -157,6 +157,14 @@ namespace QuantConnect.Lean.DataSource.Polygon
                         continue;
                     }
 
+                    // Don't retry on client errors (4xx) - these are definitive and won't change on retry
+                    // (429 is already handled above with backoff)
+                    if ((int)response.StatusCode >= 400 && (int)response.StatusCode < 500)
+                    {
+                        Log.Debug($"PolygonRestApi.DownloadWithRetries(): Client error {response.StatusCode} ({(int)response.StatusCode}) for {requestUri}");
+                        return null;
+                    }
+
                     if (response.IsSuccessStatusCode && !string.IsNullOrEmpty(content))
                     {
                         return content;

@@ -564,12 +564,27 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// </summary>
         private static void ValidateSubscription()
         {
+            // Skip validation when running locally without QC cloud credentials
+            if (Config.GetBool("polygon-skip-subscription-validation", false))
+            {
+                Log.Trace("PolygonDataProvider.ValidateSubscription(): Skipping subscription validation (polygon-skip-subscription-validation=true)");
+                return;
+            }
+
             try
             {
                 const int productId = 306;
                 var userId = Globals.UserId;
                 var token = Globals.UserToken;
                 var organizationId = Globals.OrganizationID;
+
+                // Skip validation if no QC credentials are configured
+                if (userId == 0 || string.IsNullOrEmpty(token))
+                {
+                    Log.Trace("PolygonDataProvider.ValidateSubscription(): Skipping subscription validation (no QC credentials configured)");
+                    return;
+                }
+
                 // Verify we can authenticate with this user and token
                 var api = new ApiConnection(userId, token);
                 if (!api.Connected)
