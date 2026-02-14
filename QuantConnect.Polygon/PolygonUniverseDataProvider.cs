@@ -29,6 +29,8 @@ namespace QuantConnect.Lean.DataSource.Polygon
         private PolygonCoarseUniverseGenerator? _generator;
         private PolygonRestApiClient? _restClient;
         private IFactorFileProvider? _factorFileProvider;
+        private PolygonFinancialDataService? _financialService;
+        private bool _liveMode;
         private bool _initialized;
 
         /// <summary>
@@ -51,8 +53,10 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 throw new InvalidOperationException("PolygonUniverseDataProvider requires 'polygon-api-key' to be configured");
             }
 
+            _liveMode = liveMode;
             _restClient = new PolygonRestApiClient(apiKey);
             _factorFileProvider = Composer.Instance.GetPart<IFactorFileProvider>();
+            _financialService = new PolygonFinancialDataService(_restClient, liveMode);
 
             var outputDirectory = Path.Combine(Globals.DataFolder, "equity", "usa", "fundamental", "coarse");
             _generator = new PolygonCoarseUniverseGenerator(_restClient, _factorFileProvider, outputDirectory);
@@ -72,6 +76,20 @@ namespace QuantConnect.Lean.DataSource.Polygon
         public override T Get<T>(DateTime time, SecurityIdentifier securityIdentifier, FundamentalProperty name)
         {
             var enumName = Enum.GetName(name);
+
+            // Check if this is a financial statement property
+            if (_financialService != null && enumName != null && PolygonFinancialPropertyMap.IsFinancialProperty(enumName))
+            {
+                if (enumName == nameof(CoarseFundamental.HasFundamentalData))
+                {
+                    var ticker = securityIdentifier.Symbol;
+                    return (T)(object)_financialService.HasFinancialData(ticker);
+                }
+
+                var financialTicker = securityIdentifier.Symbol;
+                var value = _financialService.GetFinancialValue(financialTicker, time.Date, enumName);
+                return (T)(object)value;
+            }
 
             lock (_cacheLock)
             {
@@ -154,7 +172,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 nameof(CoarseFundamental.PriceFactor) => (T)(object)coarse.PriceFactor,
                 nameof(CoarseFundamental.SplitFactor) => (T)(object)coarse.SplitFactor,
                 nameof(CoarseFundamental.DollarVolume) => (T)(object)coarse.DollarVolume,
-                nameof(CoarseFundamental.HasFundamentalData) => (T)(object)false,
+                nameof(CoarseFundamental.HasFundamentalData) => (T)(object)(_financialService?.HasFinancialData(securityIdentifier.Symbol) ?? false),
                 _ => GetDefault<T>()
             };
         }
