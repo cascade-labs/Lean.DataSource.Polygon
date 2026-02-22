@@ -88,7 +88,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
                 var financialTicker = securityIdentifier.Symbol;
                 var value = _financialService.GetFinancialValue(financialTicker, time.Date, enumName);
-                return (T)(object)value;
+                return ConvertFromDouble<T>(value);
             }
 
             lock (_cacheLock)
@@ -151,6 +151,34 @@ namespace QuantConnect.Lean.DataSource.Polygon
         private static string GetCoarsePath(DateTime date)
         {
             return Path.Combine(Globals.DataFolder, "equity", "usa", "fundamental", "coarse", $"{date:yyyyMMdd}.csv");
+        }
+
+        /// <summary>
+        /// Safely converts a double value to the requested type T.
+        /// Handles the boxing/unboxing mismatch when LEAN requests long/int/decimal
+        /// but GetFinancialValue returns double.
+        /// </summary>
+        private T ConvertFromDouble<T>(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+            {
+                return GetDefault<T>();
+            }
+
+            var targetType = typeof(T);
+            if (targetType == typeof(double))
+            {
+                return (T)(object)value;
+            }
+
+            try
+            {
+                return (T)Convert.ChangeType(value, targetType);
+            }
+            catch
+            {
+                return GetDefault<T>();
+            }
         }
 
         /// <summary>

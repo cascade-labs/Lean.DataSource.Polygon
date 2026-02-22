@@ -53,10 +53,15 @@ namespace QuantConnect.Lean.DataSource.Polygon
         public PolygonRestApiClient(string apiKey)
         {
             _apiKey = apiKey;
-            _httpClient = new HttpClient()
+            var handler = new SocketsHttpHandler
+            {
+                MaxConnectionsPerServer = 4,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+            };
+            _httpClient = new HttpClient(handler)
             {
                 BaseAddress = new Uri(RestApiBaseUrl),
-                Timeout = TimeSpan.FromMinutes(5) // 5 minutes
+                Timeout = Timeout.InfiniteTimeSpan // per-request timeout handled by CancellationToken
             };
 
             // Set default Authorization header for all API requests
@@ -78,7 +83,8 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 var responseContent = DownloadWithRetries(requestUri);
                 if (string.IsNullOrEmpty(responseContent))
                 {
-                    throw new Exception($"{nameof(PolygonRestApiClient)}.{nameof(DownloadAndParseData)}: Failed to download data for {requestUri} after {MaxRetries} attempts.");
+                    Log.Debug($"{nameof(PolygonRestApiClient)}.{nameof(DownloadAndParseData)}: No data returned for {requestUri}");
+                    yield break;
                 }
 
                 var result = ParseResponse<T>(responseContent);
