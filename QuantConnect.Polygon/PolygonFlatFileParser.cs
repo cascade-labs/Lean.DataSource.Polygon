@@ -15,10 +15,13 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// Parses an aggs CSV stream and yields TradeBars filtered by the underlying ticker.
         /// Times are returned in UTC (caller must convert to data time zone).
         /// </summary>
+        /// <param name="optionsOnly">When true, filters for option tickers (O: prefix). When false, filters for plain stock tickers.</param>
         public static IEnumerable<TradeBar> ParseAggs(Stream csvStream, string? underlyingTicker,
-            PolygonSymbolMapper mapper, TimeSpan period)
+            PolygonSymbolMapper mapper, TimeSpan period, bool optionsOnly = true)
         {
-            var prefix = underlyingTicker != null ? $"O:{underlyingTicker}" : null;
+            var prefix = underlyingTicker != null
+                ? (optionsOnly ? $"O:{underlyingTicker}" : underlyingTicker)
+                : null;
 
             using var reader = new StreamReader(csvStream);
 
@@ -44,7 +47,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 TradeBar? bar;
                 try
                 {
-                    bar = ParseLine(line, columnIndex, prefix, mapper, period);
+                    bar = ParseLine(line, columnIndex, prefix, mapper, period, optionsOnly);
                 }
                 catch (Exception ex)
                 {
@@ -64,11 +67,12 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// Times are returned in UTC (caller must convert to data time zone).
         /// Within each group, bars are in file order (typically chronological).
         /// </summary>
+        /// <param name="optionsOnly">When true, filters for option tickers (O: prefix). When false, filters for plain stock tickers.</param>
         public static Dictionary<Symbol, List<TradeBar>> ParseAggsGrouped(Stream csvStream, string underlyingTicker,
-            PolygonSymbolMapper mapper, TimeSpan period)
+            PolygonSymbolMapper mapper, TimeSpan period, bool optionsOnly = true)
         {
             var result = new Dictionary<Symbol, List<TradeBar>>();
-            var prefix = $"O:{underlyingTicker}";
+            var prefix = optionsOnly ? $"O:{underlyingTicker}" : underlyingTicker;
 
             using var reader = new StreamReader(csvStream);
 
@@ -93,7 +97,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 lineNumber++;
                 try
                 {
-                    var bar = ParseLine(line, columnIndex, prefix, mapper, period);
+                    var bar = ParseLine(line, columnIndex, prefix, mapper, period, optionsOnly);
                     if (bar != null)
                     {
                         if (!result.TryGetValue(bar.Symbol, out var list))
@@ -114,7 +118,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
         }
 
         private static TradeBar? ParseLine(string line, ColumnIndex columnIndex, string? prefix,
-            PolygonSymbolMapper mapper, TimeSpan period)
+            PolygonSymbolMapper mapper, TimeSpan period, bool optionsOnly = true)
         {
             var fields = line.Split(',');
             if (fields.Length < columnIndex.MinFields)
@@ -132,17 +136,39 @@ namespace QuantConnect.Lean.DataSource.Polygon
                     return null;
                 }
 
-                // Ensure we don't match "SPY" with "SPYG" - next char after prefix must be a digit
-                if (ticker.Length > prefix.Length && !char.IsDigit(ticker[prefix.Length]))
+                if (optionsOnly)
+                {
+                    // Ensure we don't match "SPY" with "SPYG" - next char after prefix must be a digit
+                    if (ticker.Length > prefix.Length && !char.IsDigit(ticker[prefix.Length]))
+                    {
+                        return null;
+                    }
+                }
+                else
+                {
+                    // For stocks, exact match only (no prefix matching)
+                    if (ticker.Length != prefix.Length)
+                    {
+                        return null;
+                    }
+                }
+            }
+
+            if (optionsOnly)
+            {
+                // Only process option tickers
+                if (!ticker.StartsWith("O:"))
                 {
                     return null;
                 }
             }
-
-            // Only process option tickers
-            if (!ticker.StartsWith("O:"))
+            else
             {
-                return null;
+                // Skip option tickers when parsing stock data
+                if (ticker.StartsWith("O:"))
+                {
+                    return null;
+                }
             }
 
             var symbol = mapper.GetLeanSymbol(ticker);

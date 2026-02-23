@@ -157,7 +157,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
             _initialized = true;
             RestApiClient = new PolygonRestApiClient(_apiKey);
-            _optionChainProvider = new CachingOptionChainProvider(new PolygonOptionChainProvider(RestApiClient, _symbolMapper));
+            _optionChainProvider = new CachingOptionChainProvider(new PolygonOptionChainProvider(_symbolMapper, new PolygonFlatFileClient()));
 
             ValidateSubscription();
 

@@ -13,39 +13,28 @@
  * limitations under the License.
 */
 
-using QuantConnect.Configuration;
 using QuantConnect.Interfaces;
 using QuantConnect.Logging;
 
 namespace QuantConnect.Lean.DataSource.Polygon
 {
     /// <summary>
-    /// Polygon.io implementation of <see cref="IOptionChainProvider"/>
+    /// Polygon.io implementation of <see cref="IOptionChainProvider"/>.
+    /// Uses S3 flat files exclusively for option chain discovery.
     /// </summary>
-    /// <remarks>
-    /// Reference: https://polygon.io/docs/options/get_v3_reference_options_contracts
-    /// </remarks>
     public class PolygonOptionChainProvider : IOptionChainProvider
     {
-        private PolygonRestApiClient _restApiClient;
-        private PolygonSymbolMapper _symbolMapper;
-        private PolygonFlatFileClient? _flatFileClient;
+        private readonly PolygonSymbolMapper _symbolMapper;
+        private readonly PolygonFlatFileClient _flatFileClient;
 
         private bool _unsupportedSecurityTypeLogSent;
         private bool _flatFileChainLogSent;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="PolygonOptionChainProvider"/> class
-        /// using the API key from configuration.
         /// </summary>
         public PolygonOptionChainProvider()
         {
-            var apiKey = Config.Get("polygon-api-key");
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                throw new ArgumentException("PolygonOptionChainProvider requires 'polygon-api-key' to be configured.");
-            }
-            _restApiClient = new PolygonRestApiClient(apiKey);
             _symbolMapper = new PolygonSymbolMapper();
             _flatFileClient = new PolygonFlatFileClient();
         }
@@ -53,18 +42,16 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// <summary>
         /// Initializes a new instance of the <see cref="PolygonOptionChainProvider"/> class
         /// </summary>
-        /// <param name="restApiClient">The Polygon REST API client</param>
         /// <param name="symbolMapper">The Polygon symbol mapper</param>
-        public PolygonOptionChainProvider(PolygonRestApiClient restApiClient, PolygonSymbolMapper symbolMapper)
+        /// <param name="flatFileClient">The Polygon flat file S3 client</param>
+        public PolygonOptionChainProvider(PolygonSymbolMapper symbolMapper, PolygonFlatFileClient flatFileClient)
         {
-            _restApiClient = restApiClient;
             _symbolMapper = symbolMapper;
-            _flatFileClient = new PolygonFlatFileClient();
+            _flatFileClient = flatFileClient;
         }
 
         /// <summary>
-        /// Gets the list of option contracts for a given underlying symbol.
-        /// Uses S3 flat files when configured, falls back to REST API.
+        /// Gets the list of option contracts for a given underlying symbol from S3 flat files.
         /// </summary>
         /// <param name="symbol">The option or the underlying symbol to get the option chain for.
         /// Providing the option allows targeting an option ticker different than the default e.g. SPXW</param>
@@ -85,57 +72,25 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
             var underlying = symbol.SecurityType.IsOption() ? symbol.Underlying : symbol;
 
-            // Try flat files first
-            if (_flatFileClient != null && _flatFileClient.IsConfigured)
+            var flatFileSymbols = GetOptionContractListFromFlatFiles(underlying, date);
+            if (flatFileSymbols != null)
             {
-                var flatFileSymbols = GetOptionContractListFromFlatFiles(underlying, date);
-                if (flatFileSymbols != null)
+                foreach (var s in flatFileSymbols)
                 {
-                    foreach (var s in flatFileSymbols)
-                    {
-                        yield return s;
-                    }
-                    yield break;
+                    yield return s;
                 }
-            }
-
-            // Fall back to REST API
-            var optionsSecurityType = underlying.SecurityType == SecurityType.Index ? SecurityType.IndexOption : SecurityType.Option;
-
-            var resource = "v3/reference/options/contracts";
-            var parameters = new Dictionary<string, string>
-            {
-                ["underlying_ticker"] = underlying.Value,
-                ["as_of"] = date.ToStringInvariant("yyyy-MM-dd"),
-                ["expired"] = "false",
-                ["limit"] = "1000"
-            };
-
-            foreach (var contract in _restApiClient.DownloadAndParseData<OptionChainResponse>(resource, parameters)
-                                                  .SelectMany(response => response.Results))
-            {
-                // Unsupported option style (e.g. bermudan) or right (e.g. "other" in rare cases according to the endpoint's docs)
-                if (!Enum.TryParse<OptionStyle>(contract.Style, ignoreCase: true, out var optionStyle) ||
-                    !Enum.TryParse<OptionRight>(contract.Right, ignoreCase: true, out var optionRight))
-                {
-                    continue;
-                }
-
-                var contractSymbol = _symbolMapper.GetLeanSymbol(contract.Ticker, optionsSecurityType, underlying.ID.Market, optionStyle,
-                    contract.ExpirationDate, contract.StrikePrice, optionRight, underlying);
-                yield return contractSymbol;
             }
         }
 
         /// <summary>
         /// Derives the option chain from a day_aggs flat file.
         /// Any option ticker present in the file for the given underlying is a valid contract.
-        /// Returns null if the flat file is unavailable (caller should fall back to REST).
+        /// Returns null if the flat file is unavailable for the given date.
         /// </summary>
         private List<Symbol>? GetOptionContractListFromFlatFiles(Symbol underlying, DateTime date)
         {
             var s3Key = PolygonFlatFileClient.GetDayAggsKey(date);
-            using var stream = _flatFileClient!.GetFlatFile(s3Key);
+            using var stream = _flatFileClient.GetFlatFile(s3Key);
             if (stream == null)
             {
                 return null;

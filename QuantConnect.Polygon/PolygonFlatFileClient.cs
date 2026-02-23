@@ -13,19 +13,15 @@ namespace QuantConnect.Lean.DataSource.Polygon
     /// </summary>
     public class PolygonFlatFileClient : IDisposable
     {
-        private readonly AmazonS3Client? _client;
+        private readonly AmazonS3Client _client;
         private readonly string _bucket;
         private readonly string _tempDir;
         private readonly ConcurrentDictionary<string, Lazy<string>> _downloadCache = new();
         private bool _disposed;
 
         /// <summary>
-        /// Whether the S3 flat file credentials are configured
-        /// </summary>
-        public bool IsConfigured { get; }
-
-        /// <summary>
-        /// Initializes the Polygon flat file S3 client from config
+        /// Initializes the Polygon flat file S3 client from config.
+        /// Throws if S3 credentials are not configured.
         /// </summary>
         public PolygonFlatFileClient()
         {
@@ -38,9 +34,9 @@ namespace QuantConnect.Lean.DataSource.Polygon
             if (string.IsNullOrEmpty(endpoint) || string.IsNullOrEmpty(accessKey) ||
                 string.IsNullOrEmpty(secretKey))
             {
-                Log.Trace("PolygonFlatFileClient: S3 not configured, will fall back to REST API");
-                IsConfigured = false;
-                return;
+                throw new InvalidOperationException(
+                    "PolygonFlatFileClient: S3 credentials are required. " +
+                    "Set 'polygon-s3-endpoint', 'polygon-s3-access-key', and 'polygon-s3-secret-key' in config.");
             }
 
             var config = new AmazonS3Config
@@ -51,7 +47,6 @@ namespace QuantConnect.Lean.DataSource.Polygon
             };
 
             _client = new AmazonS3Client(accessKey, secretKey, config);
-            IsConfigured = true;
             Log.Trace($"PolygonFlatFileClient: Initialized with endpoint {endpoint}, bucket {_bucket}");
         }
 
@@ -80,6 +75,22 @@ namespace QuantConnect.Lean.DataSource.Polygon
         }
 
         /// <summary>
+        /// Gets the S3 key for a stock day_aggs flat file
+        /// </summary>
+        public static string GetStockDayAggsKey(DateTime date)
+        {
+            return $"us_stocks_sip/day_aggs_v1/{date:yyyy}/{date:MM}/{date:yyyy-MM-dd}.csv.gz";
+        }
+
+        /// <summary>
+        /// Gets the S3 key for a stock minute_aggs flat file
+        /// </summary>
+        public static string GetStockMinuteAggsKey(DateTime date)
+        {
+            return $"us_stocks_sip/minute_aggs_v1/{date:yyyy}/{date:MM}/{date:yyyy-MM-dd}.csv.gz";
+        }
+
+        /// <summary>
         /// Gets the S3 key for a stock quotes flat file
         /// </summary>
         public static string GetStockQuotesKey(DateTime date)
@@ -97,13 +108,11 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
         /// <summary>
         /// Downloads a flat file from S3 (or returns from temp cache) and returns a decompressed stream.
-        /// Returns null if the file doesn't exist or S3 is not configured.
+        /// Returns null if the file doesn't exist in S3.
         /// Thread-safe: concurrent calls for the same key will wait for the first download to complete.
         /// </summary>
         public Stream? GetFlatFile(string s3Key)
         {
-            if (!IsConfigured || _client == null) return null;
-
             var localPath = Path.Combine(_tempDir, s3Key.Replace('/', Path.DirectorySeparatorChar));
 
             // Thread-safe: use Lazy to ensure only one download per key
@@ -149,7 +158,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
                     Key = s3Key
                 };
 
-                using var response = _client!.GetObjectAsync(request).GetAwaiter().GetResult();
+                using var response = _client.GetObjectAsync(request).GetAwaiter().GetResult();
 
                 var directory = Path.GetDirectoryName(localPath)!;
                 Directory.CreateDirectory(directory);
@@ -175,7 +184,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
         {
             if (!_disposed)
             {
-                _client?.Dispose();
+                _client.Dispose();
                 // Raw flat files are cached persistently in {DataFolder}/polygon-flatfiles/
                 // for reuse across backtest runs — no cleanup on dispose
                 _disposed = true;

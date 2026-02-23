@@ -88,7 +88,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
             if (symbol.IsCanonical())
             {
                 // Fast path: use flat files for canonical options with Trade tick type
-                if (_flatFileClient.IsConfigured && tickType == TickType.Trade)
+                if (tickType == TickType.Trade)
                 {
                     if (resolution == Resolution.Daily)
                     {
@@ -105,7 +105,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
             else
             {
                 // Fast path: bulk-write all contracts from flat file, then return requested contract's data
-                if (_flatFileClient.IsConfigured && tickType == TickType.Trade
+                if (tickType == TickType.Trade
                     && resolution == Resolution.Minute
                     && (symbol.SecurityType == SecurityType.Option || symbol.SecurityType == SecurityType.IndexOption))
                 {
@@ -113,11 +113,19 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 }
 
                 // Fast path: equity tick data from S3 flat files (avoids REST API timestamp ordering bug)
-                if (_flatFileClient.IsConfigured && resolution == Resolution.Tick
+                if (resolution == Resolution.Tick
                     && symbol.SecurityType == SecurityType.Equity
                     && (tickType == TickType.Quote || tickType == TickType.Trade))
                 {
                     return GetEquityTickDataFromFlatFile(symbol, startUtc, endUtc, exchangeHours, tickType);
+                }
+
+                // Fast path: equity daily/minute trade data from S3 flat files
+                if (tickType == TickType.Trade
+                    && symbol.SecurityType == SecurityType.Equity
+                    && (resolution == Resolution.Daily || resolution == Resolution.Minute))
+                {
+                    return GetEquityAggDataFromFlatFile(symbol, startUtc, endUtc, resolution);
                 }
 
                 var historyRequest = new HistoryRequest(startUtc, endUtc, dataType, symbol, resolution, exchangeHours, dataTimeZone, resolution,
@@ -283,6 +291,36 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 foreach (var tick in ticks)
                 {
                     yield return tick;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Downloads equity daily or minute trade data from S3 flat files.
+        /// </summary>
+        private IEnumerable<BaseData> GetEquityAggDataFromFlatFile(Symbol symbol, DateTime startUtc, DateTime endUtc,
+            Resolution resolution)
+        {
+            var ticker = symbol.Value;
+            var period = resolution == Resolution.Daily ? TimeSpan.FromDays(1) : TimeSpan.FromMinutes(1);
+
+            Log.Debug($"PolygonDataDownloader: Using flat files for {ticker} {resolution} trade data");
+
+            foreach (var date in Time.EachDay(startUtc.Date, endUtc.Date))
+            {
+                var s3Key = resolution == Resolution.Daily
+                    ? PolygonFlatFileClient.GetStockDayAggsKey(date)
+                    : PolygonFlatFileClient.GetStockMinuteAggsKey(date);
+
+                using var stream = _flatFileClient.GetFlatFile(s3Key);
+                if (stream == null)
+                {
+                    continue;
+                }
+
+                foreach (var bar in PolygonFlatFileParser.ParseAggs(stream, ticker, _symbolMapper, period, optionsOnly: false))
+                {
+                    yield return bar;
                 }
             }
         }

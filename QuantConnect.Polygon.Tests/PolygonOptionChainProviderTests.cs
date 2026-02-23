@@ -1,4 +1,4 @@
-﻿/*
+/*
  * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
  * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
  *
@@ -14,36 +14,32 @@
  *
 */
 
-using Moq;
 using System;
 using System.Linq;
 using NUnit.Framework;
 using QuantConnect.Logging;
-using QuantConnect.Configuration;
 using System.Collections.Generic;
 
 namespace QuantConnect.Lean.DataSource.Polygon.Tests
 {
     [TestFixture]
-    [Explicit("Requires Polygon API key and depends on internet connection")]
+    [Explicit("Requires Polygon S3 credentials and depends on internet connection")]
     public class PolygonOptionChainProviderTests
     {
-        private readonly string _apiKey = Config.Get("polygon-api-key");
-
-        private PolygonRestApiClient _restApiClient;
+        private PolygonFlatFileClient _flatFileClient;
         private PolygonOptionChainProvider _optionChainProvider;
 
         [OneTimeSetUp]
         public void SetUp()
         {
-            _restApiClient = new PolygonRestApiClient(_apiKey);
-            _optionChainProvider = new PolygonOptionChainProvider(_restApiClient, new PolygonSymbolMapper());
+            _flatFileClient = new PolygonFlatFileClient();
+            _optionChainProvider = new PolygonOptionChainProvider(new PolygonSymbolMapper(), _flatFileClient);
         }
 
         [OneTimeTearDown]
         public void TearDown()
         {
-            _restApiClient.Dispose();
+            _flatFileClient.Dispose();
         }
 
         private static Symbol[] Underlyings =>
@@ -121,32 +117,6 @@ namespace QuantConnect.Lean.DataSource.Polygon.Tests
             Assert.That(spx, Is.Not.Empty);
 
             Assert.That(spxw.Count + spx.Count, Is.EqualTo(chain.Count));
-        }
-
-        [TestCaseSource(nameof(Underlyings))]
-        public void ValidateQueryParameterToSpecificSymbolValue(Symbol underlyingSymbol)
-        {
-            string capturedResource = null;
-            Dictionary<string, string> capturedParameters = null;
-
-            var mock = new Mock<PolygonRestApiClient>("api-key");
-            mock.Setup(m => m.DownloadAndParseData<OptionChainResponse>(It.IsAny<string>(), It.IsAny<Dictionary<string, string>>()))
-                .Callback((string resource, Dictionary<string, string> parameters) =>
-                {
-                    capturedResource = resource;
-                    capturedParameters = parameters;
-                })
-                .Returns(new List<OptionChainResponse>());
-
-            var optionChainProvider = new PolygonOptionChainProvider(mock.Object, new PolygonSymbolMapper());
-            var expiryDate = new DateTime(2024, 03, 15);
-            var option = Symbol.CreateOption(underlyingSymbol, Market.USA, OptionStyle.American, OptionRight.Call, 1000m, expiryDate);
-            var optionContracts = optionChainProvider.GetOptionContractList(option, expiryDate).ToList();
-
-            Assert.IsNotNull(optionContracts);
-            Assert.IsNotNull(capturedParameters);
-            Assert.IsTrue(capturedParameters.ContainsKey("underlying_ticker"));
-            Assert.AreEqual(option.Underlying.Value, capturedParameters["underlying_ticker"]);
         }
 
         [TestCaseSource(nameof(Underlyings))]
