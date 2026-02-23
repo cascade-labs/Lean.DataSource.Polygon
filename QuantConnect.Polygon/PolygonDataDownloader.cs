@@ -15,11 +15,14 @@
 
 using NodaTime;
 using QuantConnect.Data;
+using QuantConnect.Data.Market;
 using QuantConnect.Util;
 using QuantConnect.Logging;
 using QuantConnect.Securities;
 using QuantConnect.Configuration;
 using System.Collections.Concurrent;
+using System.IO.Compression;
+using System.Text;
 
 namespace QuantConnect.Lean.DataSource.Polygon
 {
@@ -34,6 +37,15 @@ namespace QuantConnect.Lean.DataSource.Polygon
         /// <inheritdoc cref="MarketHoursDatabase" />
         private readonly MarketHoursDatabase _marketHoursDatabase;
 
+        private readonly PolygonFlatFileClient _flatFileClient;
+        private readonly PolygonSymbolMapper _symbolMapper;
+
+        /// <summary>
+        /// Tracks which date+underlying combos have had their minute data bulk-written to Lean format.
+        /// Key format: "{underlying}_{yyyyMMdd}"
+        /// </summary>
+        private readonly ConcurrentDictionary<string, bool> _minuteDataWritten = new();
+
         /// <summary>
         /// Initializes a new instance of the <see cref="PolygonDataDownloader"/>
         /// </summary>
@@ -43,6 +55,8 @@ namespace QuantConnect.Lean.DataSource.Polygon
         {
             _historyProvider = new PolygonDataProvider(apiKey, false, licenseTypeFromConfig: licenseType);
             _marketHoursDatabase = MarketHoursDatabase.FromDataFolder();
+            _flatFileClient = new PolygonFlatFileClient();
+            _symbolMapper = new PolygonSymbolMapper();
         }
 
         /// <summary>
@@ -73,10 +87,39 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
             if (symbol.IsCanonical())
             {
+                // Fast path: use flat files for canonical options with Trade tick type
+                if (_flatFileClient.IsConfigured && tickType == TickType.Trade)
+                {
+                    if (resolution == Resolution.Daily)
+                    {
+                        return GetCanonicalOptionHistoryFromFlatFiles(symbol, startUtc, endUtc);
+                    }
+                    if (resolution == Resolution.Minute)
+                    {
+                        return GetCanonicalOptionMinuteFromFlatFiles(symbol, startUtc, endUtc);
+                    }
+                }
+
                 return GetCanonicalOptionHistory(symbol, startUtc, endUtc, dataType, resolution, exchangeHours, dataTimeZone, tickType);
             }
             else
             {
+                // Fast path: bulk-write all contracts from flat file, then return requested contract's data
+                if (_flatFileClient.IsConfigured && tickType == TickType.Trade
+                    && resolution == Resolution.Minute
+                    && (symbol.SecurityType == SecurityType.Option || symbol.SecurityType == SecurityType.IndexOption))
+                {
+                    return GetOptionMinuteDataViaFlatFile(symbol, startUtc, endUtc, dataTimeZone);
+                }
+
+                // Fast path: equity tick data from S3 flat files (avoids REST API timestamp ordering bug)
+                if (_flatFileClient.IsConfigured && resolution == Resolution.Tick
+                    && symbol.SecurityType == SecurityType.Equity
+                    && (tickType == TickType.Quote || tickType == TickType.Trade))
+                {
+                    return GetEquityTickDataFromFlatFile(symbol, startUtc, endUtc, exchangeHours, tickType);
+                }
+
                 var historyRequest = new HistoryRequest(startUtc, endUtc, dataType, symbol, resolution, exchangeHours, dataTimeZone, resolution,
                     true, false, DataNormalizationMode.Raw, tickType);
 
@@ -88,6 +131,192 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 }
 
                 return historyData;
+            }
+        }
+
+        /// <summary>
+        /// Returns daily data for all contracts from flat files (used for universe generation).
+        /// </summary>
+        private IEnumerable<BaseData> GetCanonicalOptionHistoryFromFlatFiles(Symbol symbol, DateTime startUtc, DateTime endUtc)
+        {
+            var underlying = symbol.Underlying?.Value ?? symbol.ID.Symbol;
+
+            Log.Debug($"PolygonDataDownloader: Using flat files for canonical {underlying} daily data");
+
+            foreach (var date in Time.EachDay(startUtc.Date, endUtc.Date))
+            {
+                var s3Key = PolygonFlatFileClient.GetDayAggsKey(date);
+
+                using var stream = _flatFileClient.GetFlatFile(s3Key);
+                if (stream == null)
+                {
+                    continue;
+                }
+
+                foreach (var bar in PolygonFlatFileParser.ParseAggs(stream, underlying, _symbolMapper, TimeSpan.FromDays(1)))
+                {
+                    yield return bar;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns minute data for all contracts from flat files (canonical symbol path).
+        /// The DownloaderDataProvider/LeanDataWriter will write the data to the appropriate zip files.
+        /// </summary>
+        private IEnumerable<BaseData> GetCanonicalOptionMinuteFromFlatFiles(Symbol symbol, DateTime startUtc, DateTime endUtc)
+        {
+            var underlying = symbol.Underlying?.Value ?? symbol.ID.Symbol;
+
+            Log.Debug($"PolygonDataDownloader: Using flat files for canonical {underlying} minute data");
+
+            foreach (var date in Time.EachDay(startUtc.Date, endUtc.Date))
+            {
+                var s3Key = PolygonFlatFileClient.GetMinuteAggsKey(date);
+
+                using var stream = _flatFileClient.GetFlatFile(s3Key);
+                if (stream == null)
+                {
+                    continue;
+                }
+
+                foreach (var bar in PolygonFlatFileParser.ParseAggs(stream, underlying, _symbolMapper, TimeSpan.FromMinutes(1)))
+                {
+                    yield return bar;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Downloads a minute flat file, bulk-writes ALL contracts to Lean format zip files in the data directory,
+        /// then returns data for the specifically requested contract.
+        /// Subsequent calls for other contracts on the same date will find files already on disk.
+        /// </summary>
+        private IEnumerable<BaseData>? GetOptionMinuteDataViaFlatFile(Symbol symbol, DateTime startUtc, DateTime endUtc,
+            DateTimeZone dataTimeZone)
+        {
+            var underlying = symbol.Underlying?.Value ?? symbol.ID.Symbol;
+            var results = new List<TradeBar>();
+
+            foreach (var date in Time.EachDay(startUtc.Date, endUtc.Date))
+            {
+                var dateKey = $"{underlying}_{date:yyyyMMdd}";
+
+                if (_minuteDataWritten.ContainsKey(dateKey))
+                {
+                    // Already bulk-written this date. The caller (DownloaderDataProvider) should find
+                    // the file on disk. But in case we're called directly, return empty and let the
+                    // pipeline read from disk.
+                    continue;
+                }
+
+                var s3Key = PolygonFlatFileClient.GetMinuteAggsKey(date);
+
+                using var stream = _flatFileClient.GetFlatFile(s3Key);
+                if (stream == null)
+                {
+                    continue;
+                }
+
+                var grouped = PolygonFlatFileParser.ParseAggsGrouped(stream, underlying, _symbolMapper, TimeSpan.FromMinutes(1));
+
+                if (grouped.Count == 0)
+                {
+                    _minuteDataWritten.TryAdd(dateKey, true);
+                    continue;
+                }
+
+                // Convert all times from UTC to data time zone for Lean format
+                foreach (var bars in grouped.Values)
+                {
+                    foreach (var bar in bars)
+                    {
+                        bar.Time = bar.Time.ConvertFromUtc(dataTimeZone);
+                        bar.EndTime = bar.EndTime.ConvertFromUtc(dataTimeZone);
+                    }
+                }
+
+                // Bulk-write ALL contracts to a single Lean zip file
+                BulkWriteMinuteZip(grouped, date);
+
+                _minuteDataWritten.TryAdd(dateKey, true);
+
+                // Extract the requested contract's data to return to the caller
+                if (grouped.TryGetValue(symbol, out var requestedBars))
+                {
+                    results.AddRange(requestedBars);
+                }
+
+                Log.Debug($"PolygonDataDownloader: Bulk-wrote {grouped.Count} contracts for {underlying} on {date:yyyy-MM-dd}");
+            }
+
+            return results.Count > 0 ? results : null;
+        }
+
+        /// <summary>
+        /// Downloads equity tick data (trades or quotes) from S3 flat files.
+        /// Uses sip_timestamp which is pre-sorted in the file, avoiding the REST API ordering bug.
+        /// </summary>
+        private IEnumerable<BaseData> GetEquityTickDataFromFlatFile(Symbol symbol, DateTime startUtc, DateTime endUtc,
+            SecurityExchangeHours exchangeHours, TickType tickType)
+        {
+            var ticker = symbol.Value;
+
+            Log.Debug($"PolygonDataDownloader: Using flat files for {ticker} tick {tickType} data");
+
+            foreach (var date in Time.EachDay(startUtc.Date, endUtc.Date))
+            {
+                var s3Key = tickType == TickType.Quote
+                    ? PolygonFlatFileClient.GetStockQuotesKey(date)
+                    : PolygonFlatFileClient.GetStockTradesKey(date);
+
+                using var stream = _flatFileClient.GetFlatFile(s3Key);
+                if (stream == null)
+                {
+                    continue;
+                }
+
+                var ticks = tickType == TickType.Quote
+                    ? PolygonFlatFileParser.ParseStockQuotes(stream, symbol, ticker, exchangeHours.TimeZone)
+                    : PolygonFlatFileParser.ParseStockTrades(stream, symbol, ticker, exchangeHours.TimeZone);
+
+                foreach (var tick in ticks)
+                {
+                    yield return tick;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Writes all contracts' minute data into a single Lean-format zip file for the given date.
+        /// </summary>
+        private static void BulkWriteMinuteZip(Dictionary<Symbol, List<TradeBar>> grouped, DateTime date)
+        {
+            // All option contracts for the same underlying+date go into one zip file.
+            // Use any contract symbol to derive the zip path (they all produce the same path).
+            var anySymbol = grouped.Keys.First();
+            var zipPath = LeanData.GenerateZipFilePath(Globals.DataFolder, anySymbol, date, Resolution.Minute, TickType.Trade);
+
+            var dir = Path.GetDirectoryName(zipPath)!;
+            Directory.CreateDirectory(dir);
+
+            using var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            using var archive = new ZipArchive(fs, ZipArchiveMode.Create, leaveOpen: false);
+
+            foreach (var (contractSymbol, bars) in grouped)
+            {
+                var entryName = LeanData.GenerateZipEntryName(contractSymbol, date, Resolution.Minute, TickType.Trade);
+
+                var csv = new StringBuilder();
+                foreach (var bar in bars)
+                {
+                    csv.AppendLine(LeanData.GenerateLine(bar, contractSymbol.ID.SecurityType, Resolution.Minute));
+                }
+
+                var zipEntry = archive.CreateEntry(entryName, CompressionLevel.Optimal);
+                using var entryStream = zipEntry.Open();
+                var bytes = Encoding.UTF8.GetBytes(csv.ToString().TrimEnd());
+                entryStream.Write(bytes, 0, bytes.Length);
             }
         }
 
@@ -159,6 +388,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
         public void Dispose()
         {
             _historyProvider.DisposeSafely();
+            _flatFileClient.Dispose();
         }
     }
 }
