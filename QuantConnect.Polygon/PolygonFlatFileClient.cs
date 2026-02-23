@@ -80,6 +80,22 @@ namespace QuantConnect.Lean.DataSource.Polygon
         }
 
         /// <summary>
+        /// Gets the S3 key for a stock quotes flat file
+        /// </summary>
+        public static string GetStockQuotesKey(DateTime date)
+        {
+            return $"us_stocks_sip/quotes_v1/{date:yyyy}/{date:MM}/{date:yyyy-MM-dd}.csv.gz";
+        }
+
+        /// <summary>
+        /// Gets the S3 key for a stock trades flat file
+        /// </summary>
+        public static string GetStockTradesKey(DateTime date)
+        {
+            return $"us_stocks_sip/trades_v1/{date:yyyy}/{date:MM}/{date:yyyy-MM-dd}.csv.gz";
+        }
+
+        /// <summary>
         /// Downloads a flat file from S3 (or returns from temp cache) and returns a decompressed stream.
         /// Returns null if the file doesn't exist or S3 is not configured.
         /// Thread-safe: concurrent calls for the same key will wait for the first download to complete.

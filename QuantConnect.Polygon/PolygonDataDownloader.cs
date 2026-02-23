@@ -112,6 +112,14 @@ namespace QuantConnect.Lean.DataSource.Polygon
                     return GetOptionMinuteDataViaFlatFile(symbol, startUtc, endUtc, dataTimeZone);
                 }
 
+                // Fast path: equity tick data from S3 flat files (avoids REST API timestamp ordering bug)
+                if (_flatFileClient.IsConfigured && resolution == Resolution.Tick
+                    && symbol.SecurityType == SecurityType.Equity
+                    && (tickType == TickType.Quote || tickType == TickType.Trade))
+                {
+                    return GetEquityTickDataFromFlatFile(symbol, startUtc, endUtc, exchangeHours, tickType);
+                }
+
                 var historyRequest = new HistoryRequest(startUtc, endUtc, dataType, symbol, resolution, exchangeHours, dataTimeZone, resolution,
                     true, false, DataNormalizationMode.Raw, tickType);
 
@@ -243,6 +251,40 @@ namespace QuantConnect.Lean.DataSource.Polygon
             }
 
             return results.Count > 0 ? results : null;
+        }
+
+        /// <summary>
+        /// Downloads equity tick data (trades or quotes) from S3 flat files.
+        /// Uses sip_timestamp which is pre-sorted in the file, avoiding the REST API ordering bug.
+        /// </summary>
+        private IEnumerable<BaseData> GetEquityTickDataFromFlatFile(Symbol symbol, DateTime startUtc, DateTime endUtc,
+            SecurityExchangeHours exchangeHours, TickType tickType)
+        {
+            var ticker = symbol.Value;
+
+            Log.Debug($"PolygonDataDownloader: Using flat files for {ticker} tick {tickType} data");
+
+            foreach (var date in Time.EachDay(startUtc.Date, endUtc.Date))
+            {
+                var s3Key = tickType == TickType.Quote
+                    ? PolygonFlatFileClient.GetStockQuotesKey(date)
+                    : PolygonFlatFileClient.GetStockTradesKey(date);
+
+                using var stream = _flatFileClient.GetFlatFile(s3Key);
+                if (stream == null)
+                {
+                    continue;
+                }
+
+                var ticks = tickType == TickType.Quote
+                    ? PolygonFlatFileParser.ParseStockQuotes(stream, symbol, ticker, exchangeHours.TimeZone)
+                    : PolygonFlatFileParser.ParseStockTrades(stream, symbol, ticker, exchangeHours.TimeZone);
+
+                foreach (var tick in ticks)
+                {
+                    yield return tick;
+                }
+            }
         }
 
         /// <summary>
