@@ -29,7 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<Compile Include="..\..\..\Common\Properties\SharedAssemblyInfo.cs" Link="Properties\SharedAssemblyInfo.cs" />
+		<Compile Include="..\..\Lean\Common\Properties\SharedAssemblyInfo.cs" Link="Properties\SharedAssemblyInfo.cs" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -37,7 +37,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="..\..\..\Common\QuantConnect.csproj" />
-		<ProjectReference Include="..\..\..\Engine\QuantConnect.Lean.Engine.csproj" />
+		<ProjectReference Include="..\..\Lean\Common\QuantConnect.csproj" />
+		<ProjectReference Include="..\..\Lean\Engine\QuantConnect.Lean.Engine.csproj" />
 	</ItemGroup>
 </Project>
