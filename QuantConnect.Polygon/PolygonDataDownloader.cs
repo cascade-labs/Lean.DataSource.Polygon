@@ -81,6 +81,14 @@ namespace QuantConnect.Lean.DataSource.Polygon
             var endUtc = parameters.EndUtc;
             var tickType = parameters.TickType;
 
+            // Polygon does not provide OpenInterest data for options. Return empty (not null) so
+            // CanonicalDataDownloaderDecorator does not fall back to LiveOptionChainProvider and
+            // make hundreds of API calls across the warmup date range.
+            if (tickType == TickType.OpenInterest)
+            {
+                return Enumerable.Empty<BaseData>();
+            }
+
             var dataType = LeanData.GetDataType(resolution, tickType);
             var exchangeHours = _marketHoursDatabase.GetExchangeHours(symbol.ID.Market, symbol, symbol.SecurityType);
             var dataTimeZone = _marketHoursDatabase.GetDataTimeZone(symbol.ID.Market, symbol, symbol.SecurityType);
