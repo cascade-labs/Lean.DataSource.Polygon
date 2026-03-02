@@ -242,25 +242,22 @@ namespace QuantConnect.Lean.DataSource.Polygon
                     continue;
                 }
 
-                // Convert all times from UTC to data time zone for Lean format
-                foreach (var bars in grouped.Values)
-                {
-                    foreach (var bar in bars)
-                    {
-                        bar.Time = bar.Time.ConvertFromUtc(dataTimeZone);
-                        bar.EndTime = bar.EndTime.ConvertFromUtc(dataTimeZone);
-                    }
-                }
-
-                // Bulk-write ALL contracts to a single Lean zip file
-                BulkWriteMinuteZip(grouped, date);
+                // Bulk-write ALL contracts to a single Lean zip file.
+                // UTC→dataTimeZone conversion is done inside BulkWriteMinuteZip.
+                BulkWriteMinuteZip(grouped, date, dataTimeZone);
 
                 _minuteDataWritten.TryAdd(dateKey, true);
 
-                // Extract the requested contract's data to return to the caller
+                // Extract the requested contract's data to return to the caller (in local time).
                 if (grouped.TryGetValue(symbol, out var requestedBars))
                 {
-                    results.AddRange(requestedBars);
+                    foreach (var bar in requestedBars)
+                    {
+                        results.Add(new TradeBar(
+                            bar.Time.ConvertFromUtc(dataTimeZone),
+                            bar.Symbol, bar.Open, bar.High, bar.Low, bar.Close,
+                            bar.Volume, bar.Period));
+                    }
                 }
 
                 Log.Debug($"PolygonDataDownloader: Bulk-wrote {grouped.Count} contracts for {underlying} on {date:yyyy-MM-dd}");
@@ -335,8 +332,10 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
         /// <summary>
         /// Writes all contracts' minute data into a single Lean-format zip file for the given date.
+        /// Bar times from ParseAggsGrouped are in UTC; this method converts them to dataTimeZone
+        /// before writing so LEAN can read them as milliseconds-from-midnight in local time.
         /// </summary>
-        private static void BulkWriteMinuteZip(Dictionary<Symbol, List<TradeBar>> grouped, DateTime date)
+        private static void BulkWriteMinuteZip(Dictionary<Symbol, List<TradeBar>> grouped, DateTime date, DateTimeZone dataTimeZone)
         {
             // All option contracts for the same underlying+date go into one zip file.
             // Use any contract symbol to derive the zip path (they all produce the same path).
@@ -356,7 +355,12 @@ namespace QuantConnect.Lean.DataSource.Polygon
                 var csv = new StringBuilder();
                 foreach (var bar in bars)
                 {
-                    csv.AppendLine(LeanData.GenerateLine(bar, contractSymbol.ID.SecurityType, Resolution.Minute));
+                    // Convert UTC bar time to local data time zone for LEAN's ms-from-midnight format.
+                    var localBar = new TradeBar(
+                        bar.Time.ConvertFromUtc(dataTimeZone),
+                        bar.Symbol, bar.Open, bar.High, bar.Low, bar.Close,
+                        bar.Volume, bar.Period);
+                    csv.AppendLine(LeanData.GenerateLine(localBar, contractSymbol.ID.SecurityType, Resolution.Minute));
                 }
 
                 var zipEntry = archive.CreateEntry(entryName, CompressionLevel.Optimal);

@@ -104,6 +104,26 @@ namespace QuantConnect.Lean.DataSource.Polygon
         }
 
         /// <summary>
+        /// Ensures the coarse universe file for the given date exists, generating it via Polygon if needed.
+        /// Called by ThetaDataDataProvider to avoid per-ticker EOD fetching.
+        /// </summary>
+        public void EnsureCoarseFile(DateTime date)
+        {
+            var path = GetCoarsePath(date);
+            if (!File.Exists(path))
+            {
+                DownloadSynchronizer.Execute($"polygon-coarse-{date:yyyyMMdd}", singleExecution: true, () =>
+                {
+                    if (!File.Exists(path))
+                    {
+                        Log.Trace($"PolygonUniverseDataProvider: Generating coarse file for {date:yyyy-MM-dd} (on-demand)");
+                        _generator!.GenerateForDate(date);
+                    }
+                });
+            }
+        }
+
+        /// <summary>
         /// Loads coarse data from disk, downloading if necessary
         /// </summary>
         private void LoadOrDownload(DateTime date)
