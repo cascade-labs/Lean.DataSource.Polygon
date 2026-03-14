@@ -39,11 +39,13 @@ namespace QuantConnect.Lean.DataSource.Polygon
                     "Set 'polygon-s3-endpoint', 'polygon-s3-access-key', and 'polygon-s3-secret-key' in config.");
             }
 
+            var region = Config.Get("polygon-s3-region", "us-east-1");
             var config = new AmazonS3Config
             {
                 ServiceURL = $"https://{endpoint}",
                 ForcePathStyle = true,
-                SignatureVersion = "4"
+                SignatureVersion = "4",
+                AuthenticationRegion = region
             };
 
             _client = new AmazonS3Client(accessKey, secretKey, config);

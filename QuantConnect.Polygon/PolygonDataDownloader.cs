@@ -183,6 +183,7 @@ namespace QuantConnect.Lean.DataSource.Polygon
         private IEnumerable<BaseData> GetCanonicalOptionMinuteFromFlatFiles(Symbol symbol, DateTime startUtc, DateTime endUtc)
         {
             var underlying = symbol.Underlying?.Value ?? symbol.ID.Symbol;
+            var dataTimeZone = _marketHoursDatabase.GetDataTimeZone(symbol.ID.Market, symbol, symbol.SecurityType);
 
             Log.Debug($"PolygonDataDownloader: Using flat files for canonical {underlying} minute data");
 
@@ -198,7 +199,12 @@ namespace QuantConnect.Lean.DataSource.Polygon
 
                 foreach (var bar in PolygonFlatFileParser.ParseAggs(stream, underlying, _symbolMapper, TimeSpan.FromMinutes(1)))
                 {
-                    yield return bar;
+                    // Flat file timestamps are UTC; convert to data time zone so LEAN writes
+                    // ms-from-midnight in local time rather than UTC.
+                    yield return new TradeBar(
+                        bar.Time.ConvertFromUtc(dataTimeZone),
+                        bar.Symbol, bar.Open, bar.High, bar.Low, bar.Close,
+                        bar.Volume, bar.Period);
                 }
             }
         }
